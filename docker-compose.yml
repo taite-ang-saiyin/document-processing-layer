@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database Container
+  db:
+    image: postgres:16-alpine
+    container_name: ocr_postgres_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ocr_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ocr_password_secure}
+      POSTGRES_DB: ${POSTGRES_DB:-ocr_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ocr_user} -d ${POSTGRES_DB:-ocr_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Document Processing Pipeline Backend FastAPI Container
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ocr_backend_api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-postgresql://ocr_user:ocr_password_secure@db:5432/ocr_db}
+      - DEVICE=${DEVICE:-cpu}
+      - BLUR_LAPLACIAN_THRESHOLD=100.0
+      - CONFIDENCE_THRESHOLD=0.85
+    volumes:
+      - ./models_weights:/app/models_weights
+      - ./storage:/app/storage
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+    driver: local
