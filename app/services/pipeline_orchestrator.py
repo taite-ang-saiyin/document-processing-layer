@@ -7,6 +7,7 @@ import numpy as np
 from app.config import settings
 from app.core.quality import QualityChecker
 from app.core.alignment import ImageAligner
+from app.core.crop_preprocessor import CropPreprocessor
 from app.services.crop_engine import CropEngine
 from app.services.ocr_router import OCRRouter
 from app.services.validation_engine import ValidationEngine
@@ -31,6 +32,7 @@ class DocumentProcessingPipeline:
         self.quality_checker = QualityChecker()
         self.image_aligner = ImageAligner()
         self.crop_engine = CropEngine()
+        self.crop_preprocessor = CropPreprocessor()
         self.ocr_router = OCRRouter()
         self.validation_engine = ValidationEngine()
         self.exporter = StructuredExporter()
@@ -70,7 +72,7 @@ class DocumentProcessingPipeline:
             # Resize image to baseline template dimensions if no reference image
             aligned_img = cv2.resize(image_np, (template.width, template.height))
 
-        # 3. Field Cropping, OCR Routing, and Validation
+        # 3. Field Cropping, Preprocessing, OCR Routing, and Validation
         extracted_fields = []
         needs_human_review = not quality_res.is_passed
 
@@ -80,8 +82,11 @@ class DocumentProcessingPipeline:
                 aligned_img, field_def.bbox, job_id, field_def.id
             )
 
-            # Route to OCR Engine
-            raw_text, ocr_conf = self.ocr_router.process_field_crop(crop_np, field_def.field_type)
+            # Preprocess cropped field ROI (denoise, contrast enhancement, border cleanup, aspect-ratio padding)
+            preprocessed_crop_np = self.crop_preprocessor.process(crop_np)
+
+            # Route preprocessed crop to OCR Engine
+            raw_text, ocr_conf = self.ocr_router.process_field_crop(preprocessed_crop_np, field_def.field_type)
 
             # Validate & Score
             field_res = self.validation_engine.process_and_validate(
