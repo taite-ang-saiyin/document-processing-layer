@@ -1,6 +1,7 @@
 import io
 import cv2
 import numpy as np
+from PIL import Image
 from fastapi.testclient import TestClient
 from app.main import app
 
@@ -57,3 +58,57 @@ def test_document_processing_pipeline_e2e():
     for fmt in ["json", "csv", "excel"]:
         export_res = client.get(f"/api/v1/documents/jobs/{job_id}/export/{fmt}")
         assert export_res.status_code == 200
+
+
+def test_multi_page_pdf_uses_page_specific_template_fields(monkeypatch):
+    template = {
+        "template_id": "two_page_claim_v1",
+        "name": "Two-page claim",
+        "width": 600,
+        "height": 800,
+        "pages": [
+            {"page_number": 1, "width": 600, "height": 800},
+            {"page_number": 2, "width": 600, "height": 800},
+        ],
+        "fields": [
+            {
+                "id": "field_page_one",
+                "label": "Page one field",
+                "field_type": "printed_text",
+                "page": 1,
+                "bbox": {"x": 50, "y": 100, "width": 200, "height": 60},
+            },
+            {
+                "id": "field_page_two",
+                "label": "Page two field",
+                "field_type": "printed_text",
+                "page": 2,
+                "bbox": {"x": 50, "y": 100, "width": 200, "height": 60},
+            },
+        ],
+    }
+    registered = client.post("/api/v1/templates/register", json=template)
+    assert registered.status_code == 201, registered.text
+    monkeypatch.setattr(
+        "app.api.endpoints.documents.pipeline.ocr_router.process_field_crop",
+        lambda *_args, **_kwargs: ("value", 0.95),
+    )
+
+    page_one = Image.new("RGB", (300, 400), "white")
+    page_two = Image.new("RGB", (300, 400), "white")
+    output = io.BytesIO()
+    page_one.save(output, format="PDF", save_all=True, append_images=[page_two])
+    pdf = output.getvalue()
+
+    response = client.post(
+        "/api/v1/documents/process",
+        files={"file": ("two-page.pdf", pdf, "application/pdf")},
+        data={"template_id": "two_page_claim_v1"},
+    )
+
+    assert response.status_code == 200, response.text
+    fields = response.json()["extracted_fields"]
+    assert [field["field_id"] for field in fields] == [
+        "field_page_one", "field_page_two"
+    ]
+    assert [field["page"] for field in fields] == [1, 2]

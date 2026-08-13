@@ -20,6 +20,12 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
+# Keep PDF rasterization outside the Python/torch dependency layer so adding
+# document support does not cause pip to resolve a new CUDA-enabled torch build.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    poppler-utils \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy application source code
 COPY . .
 

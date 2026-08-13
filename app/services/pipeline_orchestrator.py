@@ -17,6 +17,7 @@ from app.models.schemas import (
     ProcessingStatus,
     TemplateDefinition,
     ExtractedFieldResult,
+    QualityCheckResult,
 )
 
 
@@ -39,7 +40,7 @@ class DocumentProcessingPipeline:
 
     def process_document(
         self,
-        image_np: np.ndarray,
+        image_np: np.ndarray | list[np.ndarray],
         template_id: str,
         job_id: Optional[str] = None,
         template_reference_np: Optional[np.ndarray] = None,
@@ -62,15 +63,58 @@ class DocumentProcessingPipeline:
             JOBS_STORE[job_id] = job
             return job
 
-        # 1. Quality Check
-        quality_res = self.quality_checker.evaluate_image(image_np)
+        page_images = image_np if isinstance(image_np, list) else [image_np]
+        expected_pages = max((field.page for field in template.fields), default=1)
+        if len(page_images) < expected_pages:
+            job = DocumentProcessingJob(
+                job_id=job_id,
+                template_id=template_id,
+                status=ProcessingStatus.FAILED,
+                created_at=created_at,
+                error=(
+                    f"Template requires {expected_pages} pages, but the uploaded "
+                    f"document contains {len(page_images)}."
+                ),
+            )
+            JOBS_STORE[job_id] = job
+            return job
 
-        # 2. Image Alignment
-        if template_reference_np is not None:
-            aligned_img, homography, align_score = self.image_aligner.align_images(image_np, template_reference_np)
-        else:
-            # Resize image to baseline template dimensions if no reference image
-            aligned_img = cv2.resize(image_np, (template.width, template.height))
+        # 1. Quality Check across every required page.
+        page_quality = [
+            self.quality_checker.evaluate_image(page_images[index])
+            for index in range(expected_pages)
+        ]
+        quality_res = QualityCheckResult(
+            is_passed=all(item.is_passed for item in page_quality),
+            blur_score=round(float(np.mean([item.blur_score for item in page_quality])), 2),
+            is_blurry=any(item.is_blurry for item in page_quality),
+            illumination_ok=all(item.illumination_ok for item in page_quality),
+            message="; ".join(
+                f"Page {index}: {item.message}"
+                for index, item in enumerate(page_quality, 1)
+                if not item.is_passed
+            ) or "All document pages passed quality checks.",
+        )
+
+        # 2. Align/resize each page to its registered template dimensions.
+        page_dimensions = {
+            page.page_number: (page.width, page.height)
+            for page in (template.pages or [])
+        }
+        page_dimensions.setdefault(1, (template.width, template.height))
+        aligned_pages: dict[int, np.ndarray] = {}
+        for page_number in range(1, expected_pages + 1):
+            source_page = page_images[page_number - 1]
+            target_width, target_height = page_dimensions.get(
+                page_number, (template.width, template.height)
+            )
+            if template_reference_np is not None and page_number == 1:
+                aligned_page, _, _ = self.image_aligner.align_images(
+                    source_page, template_reference_np
+                )
+            else:
+                aligned_page = cv2.resize(source_page, (target_width, target_height))
+            aligned_pages[page_number] = aligned_page
 
         # 3. Field Cropping, Preprocessing, OCR Routing, and Validation
         extracted_fields = []
@@ -79,7 +123,7 @@ class DocumentProcessingPipeline:
         for field_def in template.fields:
             # Crop field ROI
             crop_np, crop_path = self.crop_engine.crop_field(
-                aligned_img, field_def.bbox, job_id, field_def.id
+                aligned_pages[field_def.page], field_def.bbox, job_id, field_def.id
             )
 
             # Preprocess cropped field ROI (denoise, contrast enhancement, border cleanup, aspect-ratio padding)
@@ -92,6 +136,7 @@ class DocumentProcessingPipeline:
             field_res = self.validation_engine.process_and_validate(
                 field_def, raw_text, ocr_conf, crop_path
             )
+            field_res.page = field_def.page
 
             extracted_fields.append(field_res)
 

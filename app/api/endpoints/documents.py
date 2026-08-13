@@ -1,5 +1,8 @@
 import cv2
 import numpy as np
+import subprocess
+import tempfile
+from pathlib import Path
 from fastapi import APIRouter, File, UploadFile, Form, HTTPException, status
 from fastapi.responses import FileResponse
 
@@ -28,13 +31,41 @@ async def process_document(
             detail=f"Template '{template_id}' is not registered. Please register template first.",
         )
 
-    # Read uploaded file into OpenCV image matrix
+    # Read an image or render every page of an uploaded PDF.
     contents = await file.read()
-    nparr = np.frombuffer(contents, np.uint8)
-    img_np = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-    if img_np is None:
-        raise HTTPException(status_code=400, detail="Invalid or unreadable image file format.")
+    content_type = (file.content_type or "").lower()
+    if content_type == "application/pdf" or (file.filename or "").lower().endswith(".pdf"):
+        try:
+            with tempfile.TemporaryDirectory(prefix="document-pages-") as temp_dir:
+                temp_path = Path(temp_dir)
+                source_path = temp_path / "source.pdf"
+                source_path.write_bytes(contents)
+                output_prefix = temp_path / "page"
+                subprocess.run(
+                    [
+                        "pdftoppm", "-png", "-r", "144",
+                        str(source_path), str(output_prefix),
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+                rendered_paths = sorted(
+                    temp_path.glob("page-*.png"),
+                    key=lambda path: int(path.stem.rsplit("-", 1)[1]),
+                )
+                page_images = [cv2.imread(str(path), cv2.IMREAD_COLOR) for path in rendered_paths]
+                if any(page is None for page in page_images):
+                    raise ValueError("PDF page rendering produced an unreadable image")
+        except (OSError, subprocess.CalledProcessError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="Invalid or unreadable PDF file.") from exc
+        if not page_images:
+            raise HTTPException(status_code=400, detail="PDF contains no pages.")
+        img_np: np.ndarray | list[np.ndarray] = page_images
+    else:
+        nparr = np.frombuffer(contents, np.uint8)
+        img_np = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img_np is None:
+            raise HTTPException(status_code=400, detail="Invalid or unreadable image file format.")
 
     # Execute pipeline
     job = pipeline.process_document(image_np=img_np, template_id=template_id)
