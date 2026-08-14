@@ -6,17 +6,42 @@ from pathlib import Path
 from fastapi import APIRouter, File, UploadFile, Form, HTTPException, status
 from fastapi.responses import FileResponse
 
-from app.models.schemas import DocumentProcessingJob
+from app.models.schemas import DocumentProcessingJob, OcrCropResult, FieldType
 from app.services.pipeline_orchestrator import (
     DocumentProcessingPipeline,
     JOBS_STORE,
     TEMPLATES_REGISTRY,
 )
 from app.services.exporter import StructuredExporter
+from app.core.normalizer import BurmeseTextNormalizer
 
 router = APIRouter(prefix="/documents", tags=["Document Processing"])
 pipeline = DocumentProcessingPipeline()
 exporter = StructuredExporter()
+
+
+@router.post("/ocr-crop", response_model=OcrCropResult, status_code=status.HTTP_200_OK)
+async def ocr_single_crop(
+    file: UploadFile = File(..., description="A single cropped field image to recognize"),
+    field_type: FieldType = Form(default=FieldType.PRINTED_TEXT, description="Field type to route to the matching OCR engine"),
+):
+    """Recognizes text/state from a single pre-cropped field image using the field-type-specific engine."""
+    contents = await file.read()
+    nparr = np.frombuffer(contents, np.uint8)
+    img_np = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+    if img_np is None:
+        raise HTTPException(status_code=400, detail="Invalid or unreadable image file format.")
+
+    # Route the crop directly to the appropriate recognition engine (no preprocessing)
+    raw_text, confidence = pipeline.ocr_router.process_field_crop(img_np, field_type)
+
+    return OcrCropResult(
+        field_type=field_type,
+        raw_text=raw_text,
+        normalized_text=BurmeseTextNormalizer.normalize(raw_text),
+        confidence=confidence,
+    )
 
 
 @router.post("/process", response_model=DocumentProcessingJob, status_code=status.HTTP_200_OK)

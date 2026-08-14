@@ -12,6 +12,7 @@ from app.services.crop_engine import CropEngine
 from app.services.ocr_router import OCRRouter
 from app.services.validation_engine import ValidationEngine
 from app.services.exporter import StructuredExporter
+from app.services.persistence import PersistenceService
 from app.models.schemas import (
     DocumentProcessingJob,
     ProcessingStatus,
@@ -37,6 +38,7 @@ class DocumentProcessingPipeline:
         self.ocr_router = OCRRouter()
         self.validation_engine = ValidationEngine()
         self.exporter = StructuredExporter()
+        self.persistence = PersistenceService()
 
     def process_document(
         self,
@@ -60,7 +62,7 @@ class DocumentProcessingPipeline:
                 created_at=created_at,
                 error=f"Template '{template_id}' not found in registry.",
             )
-            JOBS_STORE[job_id] = job
+            self.persistence.save_job(job, JOBS_STORE)
             return job
 
         page_images = image_np if isinstance(image_np, list) else [image_np]
@@ -170,6 +172,6 @@ class DocumentProcessingPipeline:
         # Auto-export structured data
         self.exporter.export_all(job)
 
-        # Save to jobs store
-        JOBS_STORE[job_id] = job
+        # Save to jobs store (and database when available)
+        self.persistence.save_job(job, JOBS_STORE)
         return job

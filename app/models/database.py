@@ -1,13 +1,13 @@
 import os
-from sqlalchemy import create_engine, Column, String, Float, Boolean, Text, DateTime
+from sqlalchemy import create_engine, Column, String, Float, Boolean, Text
 from sqlalchemy.orm import declarative_base, sessionmaker
-from app.config import settings
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 engine = None
 SessionLocal = None
 Base = declarative_base()
+db_available = False
 
 
 class JobORM(Base):
@@ -23,11 +23,22 @@ class JobORM(Base):
     completed_at = Column(String, nullable=True)
 
 
-if DATABASE_URL and "postgresql" in DATABASE_URL:
+class TemplateORM(Base):
+    __tablename__ = "templates"
+
+    template_id = Column(String, primary_key=True, index=True)
+    name = Column(String)
+    width = Column(Float, default=0.0)
+    height = Column(Float, default=0.0)
+    fields_json = Column(Text)
+
+
+if DATABASE_URL:
     try:
         engine = create_engine(DATABASE_URL, pool_pre_ping=True)
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
         Base.metadata.create_all(bind=engine)
-        print(f"[Database] Successfully connected to PostgreSQL at {DATABASE_URL}")
+        db_available = True
+        print(f"[Database] Successfully connected at {DATABASE_URL}")
     except Exception as e:
-        print(f"[Database] Could not connect to PostgreSQL ({e}). Operating with in-memory store.")
+        print(f"[Database] Could not connect to database ({e}). Operating with in-memory store.")

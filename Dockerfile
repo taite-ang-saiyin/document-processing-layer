@@ -15,9 +15,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy requirements and install Python dependencies
+# Copy requirements and install Python dependencies.
+# Install a CPU-only PyTorch wheel first (no CUDA) to keep the image small and
+# the build fast; the app runs on DEVICE=cpu. Installing torch before the rest
+# of requirements satisfies the "torch>=2.2.0" pin from the requirements file.
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
     pip install --no-cache-dir -r requirements.txt
 
 # Keep PDF rasterization outside the Python/torch dependency layer so adding
