@@ -19,7 +19,7 @@ def test_list_templates():
     assert response.status_code == 200
     templates = response.json()
     assert len(templates) >= 1
-    assert templates[0]["template_id"] == "claim_form_v1"
+    assert any(template["template_id"] == "claim_form_v1" for template in templates)
 
 
 def test_document_processing_pipeline_e2e():
@@ -33,7 +33,14 @@ def test_document_processing_pipeline_e2e():
     assert success
     png_bytes = img_encoded.tobytes()
 
-    # 2. Post document to /api/v1/documents/process
+    # 2. Register the approved template's canonical alignment reference.
+    reference_response = client.post(
+        "/api/v1/templates/claim_form_v1/reference",
+        files={"file": ("claim_form_reference.png", png_bytes, "image/png")},
+    )
+    assert reference_response.status_code == 201, reference_response.text
+
+    # 3. Post document to /api/v1/documents/process
     response = client.post(
         "/api/v1/documents/process",
         files={"file": ("test_claim_form.png", png_bytes, "image/png")},
@@ -46,15 +53,18 @@ def test_document_processing_pipeline_e2e():
     assert job_data["template_id"] == "claim_form_v1"
     assert len(job_data["extracted_fields"]) == 6
     assert job_data["status"] in ["COMPLETED", "HUMAN_REVIEW_REQUIRED"]
+    assert job_data["alignment_score"] is not None
+    assert job_data["alignment_score"] >= 0.5
+    assert job_data["template_selection_mode"] == "explicit"
 
     job_id = job_data["job_id"]
 
-    # 3. Test job status retrieval
+    # 4. Test job status retrieval
     job_response = client.get(f"/api/v1/documents/jobs/{job_id}")
     assert job_response.status_code == 200
     assert job_response.json()["job_id"] == job_id
 
-    # 4. Test export endpoints
+    # 5. Test export endpoints
     for fmt in ["json", "csv", "excel"]:
         export_res = client.get(f"/api/v1/documents/jobs/{job_id}/export/{fmt}")
         assert export_res.status_code == 200
@@ -89,9 +99,21 @@ def test_multi_page_pdf_uses_page_specific_template_fields(monkeypatch):
     }
     registered = client.post("/api/v1/templates/register", json=template)
     assert registered.status_code == 201, registered.text
+    reference = np.full((800, 600, 3), 255, dtype=np.uint8)
+    success, encoded_reference = cv2.imencode(".png", reference)
+    assert success
+    reference_response = client.post(
+        "/api/v1/templates/two_page_claim_v1/reference",
+        files={"file": ("reference.png", encoded_reference.tobytes(), "image/png")},
+    )
+    assert reference_response.status_code == 201, reference_response.text
     monkeypatch.setattr(
         "app.api.endpoints.documents.pipeline.ocr_router.process_field_crop",
         lambda *_args, **_kwargs: ("value", 0.95),
+    )
+    monkeypatch.setattr(
+        "app.api.endpoints.documents.pipeline.image_aligner.align_images",
+        lambda image, _reference: (cv2.resize(image, (600, 800)), None, 1.0),
     )
 
     page_one = Image.new("RGB", (300, 400), "white")

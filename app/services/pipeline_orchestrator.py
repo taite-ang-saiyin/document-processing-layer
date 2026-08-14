@@ -13,6 +13,7 @@ from app.services.ocr_router import OCRRouter
 from app.services.validation_engine import ValidationEngine
 from app.services.exporter import StructuredExporter
 from app.services.persistence import PersistenceService
+from app.services.template_references import template_reference_store
 from app.models.schemas import (
     DocumentProcessingJob,
     ProcessingStatus,
@@ -39,6 +40,7 @@ class DocumentProcessingPipeline:
         self.validation_engine = ValidationEngine()
         self.exporter = StructuredExporter()
         self.persistence = PersistenceService()
+        self.template_reference_store = template_reference_store
 
     def process_document(
         self,
@@ -46,6 +48,9 @@ class DocumentProcessingPipeline:
         template_id: str,
         job_id: Optional[str] = None,
         template_reference_np: Optional[np.ndarray] = None,
+        template_selection_mode: str = "explicit",
+        template_match_score: Optional[float] = None,
+        template_match_runner_up_score: Optional[float] = None,
     ) -> DocumentProcessingJob:
         if not job_id:
             job_id = str(uuid.uuid4())[:8]
@@ -60,6 +65,9 @@ class DocumentProcessingPipeline:
                 template_id=template_id,
                 status=ProcessingStatus.FAILED,
                 created_at=created_at,
+                template_selection_mode=template_selection_mode,
+                template_match_score=template_match_score,
+                template_match_runner_up_score=template_match_runner_up_score,
                 error=f"Template '{template_id}' not found in registry.",
             )
             self.persistence.save_job(job, JOBS_STORE)
@@ -73,12 +81,31 @@ class DocumentProcessingPipeline:
                 template_id=template_id,
                 status=ProcessingStatus.FAILED,
                 created_at=created_at,
+                template_selection_mode=template_selection_mode,
+                template_match_score=template_match_score,
+                template_match_runner_up_score=template_match_runner_up_score,
                 error=(
                     f"Template requires {expected_pages} pages, but the uploaded "
                     f"document contains {len(page_images)}."
                 ),
             )
-            JOBS_STORE[job_id] = job
+            self.persistence.save_job(job, JOBS_STORE)
+            return job
+
+        if template_reference_np is None:
+            template_reference_np = self.template_reference_store.load(template_id)
+        if template_reference_np is None:
+            job = DocumentProcessingJob(
+                job_id=job_id,
+                template_id=template_id,
+                status=ProcessingStatus.FAILED,
+                created_at=created_at,
+                template_selection_mode=template_selection_mode,
+                template_match_score=template_match_score,
+                template_match_runner_up_score=template_match_runner_up_score,
+                error=f"Template '{template_id}' has no registered reference image.",
+            )
+            self.persistence.save_job(job, JOBS_STORE)
             return job
 
         # 1. Quality Check across every required page.
@@ -98,25 +125,42 @@ class DocumentProcessingPipeline:
             ) or "All document pages passed quality checks.",
         )
 
-        # 2. Align/resize each page to its registered template dimensions.
+        # 2. Align page 1 to its approved reference.
+        aligned_page_one, _, align_score = self.image_aligner.align_images(
+            page_images[0], template_reference_np
+        )
+        if align_score < settings.ALIGNMENT_SCORE_THRESHOLD:
+            job = DocumentProcessingJob(
+                job_id=job_id,
+                template_id=template_id,
+                status=ProcessingStatus.FAILED,
+                created_at=created_at,
+                alignment_score=align_score,
+                template_selection_mode=template_selection_mode,
+                template_match_score=template_match_score,
+                template_match_runner_up_score=template_match_runner_up_score,
+                error=(
+                    f"Image alignment score {align_score:.3f} is below the required "
+                    f"threshold {settings.ALIGNMENT_SCORE_THRESHOLD:.3f}."
+                ),
+            )
+            self.persistence.save_job(job, JOBS_STORE)
+            return job
+
+        # Subsequent pages currently use their registered pixel geometry.
         page_dimensions = {
             page.page_number: (page.width, page.height)
             for page in (template.pages or [])
         }
         page_dimensions.setdefault(1, (template.width, template.height))
-        aligned_pages: dict[int, np.ndarray] = {}
-        for page_number in range(1, expected_pages + 1):
-            source_page = page_images[page_number - 1]
+        aligned_pages: dict[int, np.ndarray] = {1: aligned_page_one}
+        for page_number in range(2, expected_pages + 1):
             target_width, target_height = page_dimensions.get(
                 page_number, (template.width, template.height)
             )
-            if template_reference_np is not None and page_number == 1:
-                aligned_page, _, _ = self.image_aligner.align_images(
-                    source_page, template_reference_np
-                )
-            else:
-                aligned_page = cv2.resize(source_page, (target_width, target_height))
-            aligned_pages[page_number] = aligned_page
+            aligned_pages[page_number] = cv2.resize(
+                page_images[page_number - 1], (target_width, target_height)
+            )
 
         # 3. Field Cropping, Preprocessing, OCR Routing, and Validation
         extracted_fields = []
@@ -165,6 +209,10 @@ class DocumentProcessingPipeline:
             extracted_fields=extracted_fields,
             overall_confidence=round(overall_conf, 3),
             needs_human_review=needs_human_review,
+            alignment_score=align_score,
+            template_selection_mode=template_selection_mode,
+            template_match_score=template_match_score,
+            template_match_runner_up_score=template_match_runner_up_score,
             created_at=created_at,
             completed_at=datetime.datetime.now().isoformat(),
         )

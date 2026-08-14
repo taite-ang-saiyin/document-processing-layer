@@ -98,9 +98,8 @@ status and explains the page-count mismatch.
    pages with `pdftoppm -png -r 144` in a temporary directory.
 2. The pipeline derives the required page count from the highest `TemplateField.page`.
 3. Quality checks run on every required page and are aggregated into one job-level result.
-4. Each source page is resized to its registered page dimensions. The internal pipeline can use
-   ORB/homography alignment for page 1 when a reference image is supplied, but the public endpoint
-   currently supplies no reference and therefore uses resize alignment.
+4. Page 1 is aligned to its approved reference with ORB/homography. Subsequent pages are resized
+   to their registered page dimensions.
 5. For every field, the pipeline selects `aligned_pages[field.page]`, crops its integer ROI,
    preprocesses the crop, routes it by `field_type`, normalizes text, validates required/regex
    rules, and adds the page number to the result.
@@ -116,10 +115,14 @@ The same crop code can therefore operate on single- and multi-page forms.
 Templates and jobs are currently stored in process memory. A service restart clears them. The
 umbrella orchestrator keeps the immutable approved definition and re-registers it before each
 document request, which makes that workflow resilient to a downstream restart. Direct callers
-must perform the same registration step.
+must perform the same template and reference registration steps.
 
-The public processing endpoint requires an explicit `template_id`; automatic template matching
-is not implemented here. The handwriting and table routes currently reuse TrOCR, while checkbox
+The public processing endpoint accepts an optional `template_id`. When omitted, the service
+ranks templates that have registered references and selects one only when its score meets
+`TEMPLATE_MATCH_SCORE_THRESHOLD` and leads the runner-up by `TEMPLATE_MATCH_MARGIN`.
+Uncertain matches return a 422 response with ranked candidates.
+
+The handwriting and table routes currently reuse TrOCR, while checkbox
 and signature routes use simple pixel-density checks. Treat these as replaceable engine slots,
 not production-grade final models.
 

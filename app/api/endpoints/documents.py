@@ -3,6 +3,7 @@ import numpy as np
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Optional
 from fastapi import APIRouter, File, UploadFile, Form, HTTPException, status
 from fastapi.responses import FileResponse
 
@@ -13,11 +14,14 @@ from app.services.pipeline_orchestrator import (
     TEMPLATES_REGISTRY,
 )
 from app.services.exporter import StructuredExporter
+from app.services.template_references import template_reference_store
+from app.services.template_matcher import TemplateMatcher
 from app.core.normalizer import BurmeseTextNormalizer
 
 router = APIRouter(prefix="/documents", tags=["Document Processing"])
 pipeline = DocumentProcessingPipeline()
 exporter = StructuredExporter()
+template_matcher = TemplateMatcher()
 
 
 @router.post("/ocr-crop", response_model=OcrCropResult, status_code=status.HTTP_200_OK)
@@ -47,16 +51,12 @@ async def ocr_single_crop(
 @router.post("/process", response_model=DocumentProcessingJob, status_code=status.HTTP_200_OK)
 async def process_document(
     file: UploadFile = File(..., description="Scanned or photographed completed insurance claim form image"),
-    template_id: str = Form(..., description="Registered template ID to match against e.g. claim_form_v1"),
+    template_id: Optional[str] = Form(
+        default=None,
+        description="Optional registered template ID. Omit to select a template by reference-image matching.",
+    ),
 ):
-    """Ingests a completed claim form, runs OCR pipeline, and returns extracted structured data."""
-    if template_id not in TEMPLATES_REGISTRY:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Template '{template_id}' is not registered. Please register template first.",
-        )
-
-    # Read an image or render every page of an uploaded PDF.
+    """Processes an image or multi-page PDF with an explicit or automatically matched template."""
     contents = await file.read()
     content_type = (file.content_type or "").lower()
     if content_type == "application/pdf" or (file.filename or "").lower().endswith(".pdf"):
@@ -92,8 +92,37 @@ async def process_document(
         if img_np is None:
             raise HTTPException(status_code=400, detail="Invalid or unreadable image file format.")
 
-    # Execute pipeline
-    job = pipeline.process_document(image_np=img_np, template_id=template_id)
+    template_selection_mode = "explicit"
+    template_match_score = None
+    template_match_runner_up_score = None
+    if template_id:
+        if template_id not in TEMPLATES_REGISTRY:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Template '{template_id}' is not registered. Please register template first.",
+            )
+        if not template_reference_store.exists(template_id):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Template '{template_id}' requires a registered reference image before processing.",
+            )
+    else:
+        match_image = img_np[0] if isinstance(img_np, list) else img_np
+        match_result = template_matcher.match(match_image, TEMPLATES_REGISTRY)
+        if match_result.selected_template_id is None:
+            raise HTTPException(status_code=422, detail=match_result.as_error_detail())
+        template_id = match_result.selected_template_id
+        template_selection_mode = "automatic"
+        template_match_score = match_result.top_score
+        template_match_runner_up_score = match_result.runner_up_score
+
+    job = pipeline.process_document(
+        image_np=img_np,
+        template_id=template_id,
+        template_selection_mode=template_selection_mode,
+        template_match_score=template_match_score,
+        template_match_runner_up_score=template_match_runner_up_score,
+    )
     return job
 
 
