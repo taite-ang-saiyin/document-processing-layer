@@ -65,6 +65,13 @@ class ExtractedFieldResult(BaseModel):
     crop_image_path: Optional[str] = None
 
 
+class OcrCropResult(BaseModel):
+    field_type: FieldType
+    raw_text: str
+    normalized_text: str
+    confidence: float
+
+
 class DocumentProcessingJob(BaseModel):
     job_id: str
     template_id: str

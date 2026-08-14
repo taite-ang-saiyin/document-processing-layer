@@ -5,11 +5,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.api.router import api_router
 from app.models.schemas import TemplateDefinition, TemplateField, FieldType, BoundingBox
-from app.services.pipeline_orchestrator import TEMPLATES_REGISTRY
+from app.services.pipeline_orchestrator import TEMPLATES_REGISTRY, JOBS_STORE
+from app.services.persistence import PersistenceService
+
+persistence = PersistenceService()
 
 
 def seed_default_templates():
-    """Seed initial default Burmese Insurance Claim Form template into registry."""
+    """Seed initial default Burmese Insurance Claim Form template into registry.
+
+    Idempotent and DB-aware: skips entirely (preserving any customized version)
+    when the template already exists in the in-memory registry or the database.
+    """
+    if persistence.template_exists("claim_form_v1", TEMPLATES_REGISTRY):
+        return
     default_template = TemplateDefinition(
         template_id="claim_form_v1",
         name="Burmese Motor Insurance Claim Form",
@@ -61,11 +70,13 @@ def seed_default_templates():
             ),
         ],
     )
-    TEMPLATES_REGISTRY[default_template.template_id] = default_template
+    persistence.save_template(default_template, TEMPLATES_REGISTRY)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    persistence.load_templates(TEMPLATES_REGISTRY)
+    persistence.load_jobs(JOBS_STORE)
     seed_default_templates()
     yield
 
