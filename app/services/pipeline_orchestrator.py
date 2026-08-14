@@ -13,6 +13,7 @@ from app.services.ocr_router import OCRRouter
 from app.services.validation_engine import ValidationEngine
 from app.services.exporter import StructuredExporter
 from app.services.persistence import PersistenceService
+from app.services.template_references import template_reference_store
 from app.models.schemas import (
     DocumentProcessingJob,
     ProcessingStatus,
@@ -38,6 +39,7 @@ class DocumentProcessingPipeline:
         self.validation_engine = ValidationEngine()
         self.exporter = StructuredExporter()
         self.persistence = PersistenceService()
+        self.template_reference_store = template_reference_store
 
     def process_document(
         self,
@@ -45,6 +47,9 @@ class DocumentProcessingPipeline:
         template_id: str,
         job_id: Optional[str] = None,
         template_reference_np: Optional[np.ndarray] = None,
+        template_selection_mode: str = "explicit",
+        template_match_score: Optional[float] = None,
+        template_match_runner_up_score: Optional[float] = None,
     ) -> DocumentProcessingJob:
         if not job_id:
             job_id = str(uuid.uuid4())[:8]
@@ -59,7 +64,26 @@ class DocumentProcessingPipeline:
                 template_id=template_id,
                 status=ProcessingStatus.FAILED,
                 created_at=created_at,
+                template_selection_mode=template_selection_mode,
+                template_match_score=template_match_score,
+                template_match_runner_up_score=template_match_runner_up_score,
                 error=f"Template '{template_id}' not found in registry.",
+            )
+            self.persistence.save_job(job, JOBS_STORE)
+            return job
+
+        if template_reference_np is None:
+            template_reference_np = self.template_reference_store.load(template_id)
+        if template_reference_np is None:
+            job = DocumentProcessingJob(
+                job_id=job_id,
+                template_id=template_id,
+                status=ProcessingStatus.FAILED,
+                created_at=created_at,
+                template_selection_mode=template_selection_mode,
+                template_match_score=template_match_score,
+                template_match_runner_up_score=template_match_runner_up_score,
+                error=f"Template '{template_id}' has no registered reference image.",
             )
             self.persistence.save_job(job, JOBS_STORE)
             return job
@@ -68,11 +92,24 @@ class DocumentProcessingPipeline:
         quality_res = self.quality_checker.evaluate_image(image_np)
 
         # 2. Image Alignment
-        if template_reference_np is not None:
-            aligned_img, homography, align_score = self.image_aligner.align_images(image_np, template_reference_np)
-        else:
-            # Resize image to baseline template dimensions if no reference image
-            aligned_img = cv2.resize(image_np, (template.width, template.height))
+        aligned_img, homography, align_score = self.image_aligner.align_images(image_np, template_reference_np)
+        if align_score < settings.ALIGNMENT_SCORE_THRESHOLD:
+            job = DocumentProcessingJob(
+                job_id=job_id,
+                template_id=template_id,
+                status=ProcessingStatus.FAILED,
+                created_at=created_at,
+                alignment_score=align_score,
+                template_selection_mode=template_selection_mode,
+                template_match_score=template_match_score,
+                template_match_runner_up_score=template_match_runner_up_score,
+                error=(
+                    f"Image alignment score {align_score:.3f} is below the required "
+                    f"threshold {settings.ALIGNMENT_SCORE_THRESHOLD:.3f}."
+                ),
+            )
+            self.persistence.save_job(job, JOBS_STORE)
+            return job
 
         # 3. Field Cropping, Preprocessing, OCR Routing, and Validation
         extracted_fields = []
@@ -120,6 +157,10 @@ class DocumentProcessingPipeline:
             extracted_fields=extracted_fields,
             overall_confidence=round(overall_conf, 3),
             needs_human_review=needs_human_review,
+            alignment_score=align_score,
+            template_selection_mode=template_selection_mode,
+            template_match_score=template_match_score,
+            template_match_runner_up_score=template_match_runner_up_score,
             created_at=created_at,
             completed_at=datetime.datetime.now().isoformat(),
         )
