@@ -24,6 +24,34 @@ exporter = StructuredExporter()
 template_matcher = TemplateMatcher()
 
 
+def _load_document_images(contents: bytes, content_type: str, filename: str) -> np.ndarray | list[np.ndarray]:
+    if content_type == "application/pdf" or filename.lower().endswith(".pdf"):
+        try:
+            with tempfile.TemporaryDirectory(prefix="document-pages-") as temp_dir:
+                temp_path = Path(temp_dir)
+                source_path = temp_path / "source.pdf"
+                source_path.write_bytes(contents)
+                output_prefix = temp_path / "page"
+                subprocess.run(
+                    ["pdftoppm", "-png", "-r", "144", str(source_path), str(output_prefix)],
+                    check=True,
+                    capture_output=True,
+                )
+                rendered_paths = sorted(
+                    temp_path.glob("page-*.png"), key=lambda path: int(path.stem.rsplit("-", 1)[1])
+                )
+                page_images = [cv2.imread(str(path), cv2.IMREAD_COLOR) for path in rendered_paths]
+                if not page_images or any(page is None for page in page_images):
+                    raise ValueError("PDF page rendering produced an unreadable image")
+                return page_images
+        except (OSError, subprocess.CalledProcessError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="Invalid or unreadable PDF file.") from exc
+    image = cv2.imdecode(np.frombuffer(contents, np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        raise HTTPException(status_code=400, detail="Invalid or unreadable image file format.")
+    return image
+
+
 @router.post("/ocr-crop", response_model=OcrCropResult, status_code=status.HTTP_200_OK)
 async def ocr_single_crop(
     file: UploadFile = File(..., description="A single cropped field image to recognize"),
@@ -58,39 +86,7 @@ async def process_document(
 ):
     """Processes an image or multi-page PDF with an explicit or automatically matched template."""
     contents = await file.read()
-    content_type = (file.content_type or "").lower()
-    if content_type == "application/pdf" or (file.filename or "").lower().endswith(".pdf"):
-        try:
-            with tempfile.TemporaryDirectory(prefix="document-pages-") as temp_dir:
-                temp_path = Path(temp_dir)
-                source_path = temp_path / "source.pdf"
-                source_path.write_bytes(contents)
-                output_prefix = temp_path / "page"
-                subprocess.run(
-                    [
-                        "pdftoppm", "-png", "-r", "144",
-                        str(source_path), str(output_prefix),
-                    ],
-                    check=True,
-                    capture_output=True,
-                )
-                rendered_paths = sorted(
-                    temp_path.glob("page-*.png"),
-                    key=lambda path: int(path.stem.rsplit("-", 1)[1]),
-                )
-                page_images = [cv2.imread(str(path), cv2.IMREAD_COLOR) for path in rendered_paths]
-                if any(page is None for page in page_images):
-                    raise ValueError("PDF page rendering produced an unreadable image")
-        except (OSError, subprocess.CalledProcessError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail="Invalid or unreadable PDF file.") from exc
-        if not page_images:
-            raise HTTPException(status_code=400, detail="PDF contains no pages.")
-        img_np: np.ndarray | list[np.ndarray] = page_images
-    else:
-        nparr = np.frombuffer(contents, np.uint8)
-        img_np = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if img_np is None:
-            raise HTTPException(status_code=400, detail="Invalid or unreadable image file format.")
+    img_np = _load_document_images(contents, (file.content_type or "").lower(), file.filename or "document")
 
     template_selection_mode = "explicit"
     template_match_score = None
@@ -101,10 +97,20 @@ async def process_document(
                 status_code=400,
                 detail=f"Template '{template_id}' is not registered. Please register template first.",
             )
-        if not template_reference_store.exists(template_id):
+        template = TEMPLATES_REGISTRY[template_id]
+        expected_pages = max((field.page for field in template.fields), default=1)
+        missing_reference_pages = [
+            page_number
+            for page_number in range(1, expected_pages + 1)
+            if not template_reference_store.exists(template_id, page_number)
+        ]
+        if missing_reference_pages:
             raise HTTPException(
                 status_code=409,
-                detail=f"Template '{template_id}' requires a registered reference image before processing.",
+                detail=(
+                    f"Template '{template_id}' requires registered reference images for "
+                    f"page(s): {', '.join(map(str, missing_reference_pages))}."
+                ),
             )
     else:
         match_image = img_np[0] if isinstance(img_np, list) else img_np
@@ -126,12 +132,45 @@ async def process_document(
     return job
 
 
+@router.post("/match-template")
+async def match_template(
+    file: UploadFile = File(..., description="Document to match against approved template references"),
+):
+    """Matches the first document page and returns candidates without processing OCR."""
+    contents = await file.read()
+    image = _load_document_images(contents, (file.content_type or "").lower(), file.filename or "document")
+    match_image = image[0] if isinstance(image, list) else image
+    result = template_matcher.match(match_image, TEMPLATES_REGISTRY)
+    return {
+        "selected_template_id": result.selected_template_id,
+        "score": result.top_score,
+        "runner_up_score": result.runner_up_score,
+        "reason": result.reason,
+        "candidates": [
+            {"template_id": candidate.template_id, "score": candidate.score}
+            for candidate in result.candidates
+        ],
+    }
+
+
 @router.get("/jobs/{job_id}", response_model=DocumentProcessingJob)
 def get_job_status(job_id: str):
     """Fetches job processing status and extracted fields by job ID."""
     if job_id not in JOBS_STORE:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
     return JOBS_STORE[job_id]
+
+
+@router.get("/jobs/{job_id}/pages/{page_number}")
+def get_aligned_page(job_id: str, page_number: int):
+    """Returns the aligned page used for field cropping and OCR review."""
+    job = JOBS_STORE.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+    page_path = job.aligned_page_paths.get(page_number)
+    if not page_path or not Path(page_path).is_file():
+        raise HTTPException(status_code=404, detail=f"Aligned page {page_number} is unavailable.")
+    return FileResponse(page_path, media_type="image/png")
 
 
 @router.get("/jobs/{job_id}/export/{export_format}")

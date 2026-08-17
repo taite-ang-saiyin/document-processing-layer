@@ -121,6 +121,9 @@ class DocumentProcessingJob(BaseModel):
     overall_confidence: float = 0.0
     needs_human_review: bool = False
     alignment_score: Optional[float] = None
+    page_alignment_scores: Dict[int, float] = Field(default_factory=dict)
+    page_count: int = Field(default=1, ge=1)
+    aligned_page_paths: Dict[int, str] = Field(default_factory=dict)
     template_selection_mode: str = "explicit"
     template_match_score: Optional[float] = None
     template_match_runner_up_score: Optional[float] = None

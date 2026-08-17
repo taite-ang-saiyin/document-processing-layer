@@ -7,10 +7,8 @@ import numpy as np
 from app.config import settings
 from app.core.quality import QualityChecker
 from app.core.alignment import ImageAligner
-from app.core.crop_preprocessor import CropPreprocessor
 from app.services.crop_engine import CropEngine
 from app.services.ocr_router import OCRRouter
-from app.services.validation_engine import ValidationEngine
 from app.services.exporter import StructuredExporter
 from app.services.persistence import PersistenceService
 from app.services.template_references import template_reference_store
@@ -35,9 +33,7 @@ class DocumentProcessingPipeline:
         self.quality_checker = QualityChecker()
         self.image_aligner = ImageAligner()
         self.crop_engine = CropEngine()
-        self.crop_preprocessor = CropPreprocessor()
         self.ocr_router = OCRRouter()
-        self.validation_engine = ValidationEngine()
         self.exporter = StructuredExporter()
         self.persistence = PersistenceService()
         self.template_reference_store = template_reference_store
@@ -93,8 +89,16 @@ class DocumentProcessingPipeline:
             return job
 
         if template_reference_np is None:
-            template_reference_np = self.template_reference_store.load(template_id)
-        if template_reference_np is None:
+            template_reference_np = self.template_reference_store.load(template_id, 1)
+        template_references = {1: template_reference_np}
+        for page_number in range(2, expected_pages + 1):
+            template_references[page_number] = self.template_reference_store.load(template_id, page_number)
+        missing_reference_pages = [
+            str(page_number)
+            for page_number, reference in template_references.items()
+            if reference is None
+        ]
+        if missing_reference_pages:
             job = DocumentProcessingJob(
                 job_id=job_id,
                 template_id=template_id,
@@ -103,7 +107,10 @@ class DocumentProcessingPipeline:
                 template_selection_mode=template_selection_mode,
                 template_match_score=template_match_score,
                 template_match_runner_up_score=template_match_runner_up_score,
-                error=f"Template '{template_id}' has no registered reference image.",
+                error=(
+                    f"Template '{template_id}' has no registered reference image for "
+                    f"page(s): {', '.join(missing_reference_pages)}."
+                ),
             )
             self.persistence.save_job(job, JOBS_STORE)
             return job
@@ -125,64 +132,107 @@ class DocumentProcessingPipeline:
             ) or "All document pages passed quality checks.",
         )
 
-        # 2. Align page 1 to its approved reference.
-        aligned_page_one, _, align_score = self.image_aligner.align_images(
-            page_images[0], template_reference_np
-        )
-        if align_score < settings.ALIGNMENT_SCORE_THRESHOLD:
+        # 2. Align every uploaded page with the corresponding approved template page.
+        aligned_pages: dict[int, np.ndarray] = {}
+        page_alignment_scores: dict[int, float] = {}
+        for page_number in range(1, expected_pages + 1):
+            aligned_page, _, score = self.image_aligner.align_images(
+                page_images[page_number - 1], template_references[page_number]
+            )
+            aligned_pages[page_number] = aligned_page
+            page_alignment_scores[page_number] = float(score)
+        aligned_page_dir = settings.ALIGNED_PAGES_DIR / job_id
+        aligned_page_dir.mkdir(parents=True, exist_ok=True)
+        aligned_page_paths: dict[int, str] = {}
+        for page_number, aligned_page in aligned_pages.items():
+            path = aligned_page_dir / f"page_{page_number:03d}.png"
+            if not cv2.imwrite(str(path), aligned_page):
+                raise OSError(f"Could not save aligned document page {page_number}")
+            aligned_page_paths[page_number] = str(path)
+        lowest_alignment_score = min(page_alignment_scores.values())
+        failed_alignment_pages = {
+            page_number
+            for page_number, score in page_alignment_scores.items()
+            if score < settings.ALIGNMENT_SCORE_THRESHOLD
+        }
+        # A completely unaligned document cannot be extracted safely.  For a
+        # multi-page document, however, do not throw away the data from pages
+        # that *did* align just because another page needs a human to correct
+        # its alignment.
+        if len(failed_alignment_pages) == len(page_alignment_scores):
+            failed_pages = [str(page_number) for page_number in sorted(failed_alignment_pages)]
             job = DocumentProcessingJob(
                 job_id=job_id,
                 template_id=template_id,
                 status=ProcessingStatus.FAILED,
                 created_at=created_at,
-                alignment_score=align_score,
+                alignment_score=lowest_alignment_score,
+                page_alignment_scores=page_alignment_scores,
+                page_count=len(page_images),
+                aligned_page_paths=aligned_page_paths,
                 template_selection_mode=template_selection_mode,
                 template_match_score=template_match_score,
                 template_match_runner_up_score=template_match_runner_up_score,
                 error=(
-                    f"Image alignment score {align_score:.3f} is below the required "
+                    f"Page(s) {', '.join(failed_pages)} alignment score is below the required "
                     f"threshold {settings.ALIGNMENT_SCORE_THRESHOLD:.3f}."
                 ),
             )
             self.persistence.save_job(job, JOBS_STORE)
             return job
 
-        # Subsequent pages currently use their registered pixel geometry.
-        page_dimensions = {
-            page.page_number: (page.width, page.height)
-            for page in (template.pages or [])
-        }
-        page_dimensions.setdefault(1, (template.width, template.height))
-        aligned_pages: dict[int, np.ndarray] = {1: aligned_page_one}
-        for page_number in range(2, expected_pages + 1):
-            target_width, target_height = page_dimensions.get(
-                page_number, (template.width, template.height)
-            )
-            aligned_pages[page_number] = cv2.resize(
-                page_images[page_number - 1], (target_width, target_height)
-            )
-
-        # 3. Field Cropping, Preprocessing, OCR Routing, and Validation
+        # 3. Field cropping and raw OCR.  The review workspace deliberately
+        # receives the OCR engine's unmodified output: no crop enhancement,
+        # text normalization, or validation rules are applied here.
         extracted_fields = []
-        needs_human_review = not quality_res.is_passed
+        needs_human_review = not quality_res.is_passed or bool(failed_alignment_pages)
 
         for field_def in template.fields:
+            if field_def.page in failed_alignment_pages:
+                alignment_score = page_alignment_scores[field_def.page]
+                extracted_fields.append(
+                    ExtractedFieldResult(
+                        field_id=field_def.id,
+                        label=field_def.label,
+                        field_type=field_def.field_type,
+                        page=field_def.page,
+                        raw_text="",
+                        normalized_text="",
+                        ocr_confidence=0.0,
+                        validation_passed=False,
+                        validation_message=(
+                            f"Page {field_def.page} needs alignment review "
+                            f"({alignment_score:.3f} is below the required "
+                            f"{settings.ALIGNMENT_SCORE_THRESHOLD:.3f})."
+                        ),
+                        final_confidence=0.0,
+                        human_review_flag=True,
+                    )
+                )
+                continue
+
             # Crop field ROI
             crop_np, crop_path = self.crop_engine.crop_field(
                 aligned_pages[field_def.page], field_def.bbox, job_id, field_def.id
             )
 
-            # Preprocess cropped field ROI (denoise, contrast enhancement, border cleanup, aspect-ratio padding)
-            preprocessed_crop_np = self.crop_preprocessor.process(crop_np)
-
-            # Route preprocessed crop to OCR Engine
-            raw_text, ocr_conf = self.ocr_router.process_field_crop(preprocessed_crop_np, field_def.field_type)
-
-            # Validate & Score
-            field_res = self.validation_engine.process_and_validate(
-                field_def, raw_text, ocr_conf, crop_path
+            # Send the original crop directly to OCR.  Do not normalize or
+            # validate its returned text; use its native confidence verbatim.
+            raw_text, ocr_conf = self.ocr_router.process_field_crop(crop_np, field_def.field_type)
+            field_res = ExtractedFieldResult(
+                field_id=field_def.id,
+                label=field_def.label,
+                field_type=field_def.field_type,
+                page=field_def.page,
+                raw_text=raw_text,
+                normalized_text=raw_text,
+                ocr_confidence=ocr_conf,
+                validation_passed=True,
+                validation_message=None,
+                final_confidence=ocr_conf,
+                human_review_flag=ocr_conf < settings.CONFIDENCE_THRESHOLD,
+                crop_image_path=crop_path,
             )
-            field_res.page = field_def.page
 
             extracted_fields.append(field_res)
 
@@ -209,7 +259,10 @@ class DocumentProcessingPipeline:
             extracted_fields=extracted_fields,
             overall_confidence=round(overall_conf, 3),
             needs_human_review=needs_human_review,
-            alignment_score=align_score,
+            alignment_score=round(float(np.mean(list(page_alignment_scores.values()))), 3),
+            page_alignment_scores=page_alignment_scores,
+            page_count=len(page_images),
+            aligned_page_paths=aligned_page_paths,
             template_selection_mode=template_selection_mode,
             template_match_score=template_match_score,
             template_match_runner_up_score=template_match_runner_up_score,

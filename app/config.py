@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     UPLOAD_DIR: Path = STORAGE_DIR / "uploads"
     CROPS_DIR: Path = STORAGE_DIR / "crops"
     EXPORTS_DIR: Path = STORAGE_DIR / "exports"
+    ALIGNED_PAGES_DIR: Path = STORAGE_DIR / "aligned_pages"
     TEMPLATE_REFERENCES_DIR: Path = STORAGE_DIR / "template_references"
     
     # Pre-trained Model Configuration
@@ -21,7 +22,7 @@ class Settings(BaseSettings):
     
     # Quality & Threshold Settings
     BLUR_LAPLACIAN_THRESHOLD: float = 100.0  # Variance below this is flagged blurry
-    CONFIDENCE_THRESHOLD: float = 0.85        # Scores below this require human review
+    CONFIDENCE_THRESHOLD: float = 0.80        # Raw OCR scores below this require human review
     ALIGNMENT_SCORE_THRESHOLD: float = 0.50   # Scores below this reject extraction
     TEMPLATE_MATCH_SCORE_THRESHOLD: float = 0.50
     TEMPLATE_MATCH_MARGIN: float = 0.10       # Required lead over the runner-up
@@ -37,6 +38,7 @@ for path in [
     settings.UPLOAD_DIR,
     settings.CROPS_DIR,
     settings.EXPORTS_DIR,
+    settings.ALIGNED_PAGES_DIR,
     settings.TEMPLATE_REFERENCES_DIR,
     settings.MODEL_DIR,
 ]:
