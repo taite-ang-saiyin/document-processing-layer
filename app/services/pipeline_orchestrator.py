@@ -11,6 +11,7 @@ from app.core.crop_preprocessor import CropPreprocessor
 from app.services.crop_engine import CropEngine
 from app.services.line_detector import TextLineDetector
 from app.services.llm_post_corrector import LlmPostCorrector
+from app.services.mark_detector import TemplateMarkDetector
 from app.services.ocr_router import OCRRouter
 from app.services.exporter import StructuredExporter
 from app.services.persistence import PersistenceService
@@ -40,6 +41,7 @@ class DocumentProcessingPipeline:
         self.crop_preprocessor = CropPreprocessor()
         self.line_detector = TextLineDetector()
         self.ocr_router = OCRRouter()
+        self.mark_detector = TemplateMarkDetector()
         self.llm_post_corrector = LlmPostCorrector()
         self.exporter = StructuredExporter()
         self.persistence = PersistenceService()
@@ -247,7 +249,18 @@ class DocumentProcessingPipeline:
             )
             line_crop_paths: list[str] = []
             ocr_mode = "full_field_fallback"
-            if field_def.field_type in {FieldType.PRINTED_TEXT, FieldType.HANDWRITING, FieldType.TABLE}:
+            mark_uncertain = False
+            if field_def.field_type == FieldType.CHECKBOX:
+                reference_crop, _ = self.crop_engine.crop_field(
+                    template_references[field_def.page], field_def.bbox, job_id, field_def.id,
+                    save_to_disk=False,
+                )
+                mark = self.mark_detector.detect(crop_np, reference_crop)
+                raw_text = "[X] Checked" if mark.checked else "[ ] Unchecked"
+                ocr_conf = mark.confidence
+                mark_uncertain = mark.uncertain
+                ocr_mode = "template_delta_mark_detection"
+            elif field_def.field_type in {FieldType.PRINTED_TEXT, FieldType.HANDWRITING, FieldType.TABLE}:
                 detected_lines = self.line_detector.detect(prepared_crop)
                 if 1 <= len(detected_lines) <= 12:
                     line_results: list[tuple[str, float]] = []
@@ -291,16 +304,21 @@ class DocumentProcessingPipeline:
                 raw_text=raw_text,
                 normalized_text=self.llm_post_corrector.normalized_raw(raw_text).text,
                 ocr_confidence=ocr_conf,
-                validation_passed=True,
-                validation_message=None,
+                validation_passed=not mark_uncertain,
+                validation_message=("Checkbox/radio mark is close to the detection threshold; review required."
+                                    if mark_uncertain else None),
                 final_confidence=ocr_conf,
-                human_review_flag=ocr_conf < settings.CONFIDENCE_THRESHOLD,
+                human_review_flag=mark_uncertain or ocr_conf < settings.CONFIDENCE_THRESHOLD,
                 crop_image_path=crop_path,
                 preprocessed_crop_path=prepared_crop_path,
                 line_crop_paths=line_crop_paths,
                 ocr_mode=ocr_mode,
                 llm_post_correction_applied=False,
                 llm_post_correction_reason=None,
+                choice_group_id=field_def.choice_group_id,
+                choice_option_value=field_def.choice_option_value,
+                choice_mode=field_def.choice_mode,
+                choice_selected=(raw_text == "[X] Checked" if field_def.choice_group_id else None),
             )
 
             extracted_fields.append(field_res)
@@ -330,6 +348,9 @@ class DocumentProcessingPipeline:
                 if correction.applied:
                     field_result.human_review_flag = True
                     needs_human_review = True
+
+        if self._resolve_choice_groups(extracted_fields):
+            needs_human_review = True
 
         # Calculate overall confidence
         if extracted_fields:
@@ -369,3 +390,36 @@ class DocumentProcessingPipeline:
         # Save to jobs store (and database when available)
         self.persistence.save_job(job, JOBS_STORE)
         return job
+
+    @staticmethod
+    def _resolve_choice_groups(fields: list[ExtractedFieldResult]) -> bool:
+        """Attach a group-level outcome and reject ambiguous radio selections."""
+        groups: dict[str, list[ExtractedFieldResult]] = {}
+        for field in fields:
+            if field.choice_group_id:
+                groups.setdefault(field.choice_group_id, []).append(field)
+
+        needs_review = False
+        for members in groups.values():
+            selected = [field for field in members if field.choice_selected]
+            mode = members[0].choice_mode
+            if mode == "single_choice":
+                if len(selected) == 1:
+                    status = "selected"
+                elif not selected:
+                    status = "no_selection"
+                else:
+                    status = "ambiguous_multiple_selected"
+                for field in members:
+                    field.choice_group_status = status
+                if status != "selected":
+                    needs_review = True
+                    for field in members:
+                        field.validation_passed = False
+                        field.human_review_flag = True
+                        field.validation_message = "Radio group must contain exactly one selected option."
+            else:
+                status = "selected_options" if selected else "no_options_selected"
+                for field in members:
+                    field.choice_group_status = status
+        return needs_review

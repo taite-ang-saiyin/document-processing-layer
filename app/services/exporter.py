@@ -40,6 +40,10 @@ class StructuredExporter:
                 "Validation Passed": field.validation_passed,
                 "Final Confidence": field.final_confidence,
                 "Human Review Flag": field.human_review_flag,
+                "Choice Group": field.choice_group_id,
+                "Choice Option": field.choice_option_value,
+                "Choice Selected": field.choice_selected,
+                "Choice Group Status": field.choice_group_status,
             })
 
         df = pd.DataFrame(tabular_data)

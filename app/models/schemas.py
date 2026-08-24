@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -37,6 +37,9 @@ class TemplateField(BaseModel):
     page: int = Field(default=1, ge=1, description="One-based template page number")
     required: bool = True
     validation_regex: Optional[str] = None
+    choice_group_id: Optional[str] = Field(default=None, pattern=SAFE_IDENTIFIER_PATTERN)
+    choice_option_value: Optional[str] = Field(default=None, max_length=256)
+    choice_mode: Optional[Literal["single_choice", "multiple_choice"]] = None
 
 
 class TemplatePage(BaseModel):
@@ -108,6 +111,11 @@ class ExtractedFieldResult(BaseModel):
     ocr_mode: str = "full_field_fallback"
     llm_post_correction_applied: bool = False
     llm_post_correction_reason: Optional[str] = None
+    choice_group_id: Optional[str] = None
+    choice_option_value: Optional[str] = None
+    choice_mode: Optional[Literal["single_choice", "multiple_choice"]] = None
+    choice_selected: Optional[bool] = None
+    choice_group_status: Optional[str] = None
 
 
 class OcrCropResult(BaseModel):
