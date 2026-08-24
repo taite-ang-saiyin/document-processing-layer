@@ -11,6 +11,9 @@ htmlcov/
 storage/uploads/*
 storage/crops/*
 storage/exports/*
+storage/aligned_pages/*
+storage/line_crops/*
+storage/preprocessed_crops/*
 !storage/uploads/.gitkeep
 !storage/crops/.gitkeep
 !storage/exports/.gitkeep
