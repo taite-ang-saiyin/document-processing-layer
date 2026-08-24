@@ -13,10 +13,10 @@ approved umbrella template
         v
 POST /api/v1/templates/register
         |
-completed image/PDF + explicit template_id
+canonical paper-cropped image/PDF + explicit template_id
         |
         v
-quality -> page alignment/resize -> page ROI crops -> OCR routing -> validation -> exports
+quality -> canonical page resize -> page ROI crops -> OCR routing -> validation -> exports
 ```
 
 ## Coordinate and page ownership

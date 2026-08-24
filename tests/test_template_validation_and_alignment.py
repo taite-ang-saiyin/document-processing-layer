@@ -4,6 +4,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.api.endpoints.documents import pipeline
+from app.services.line_detector import DetectedLine
 
 
 client = TestClient(app)
@@ -145,6 +147,61 @@ def test_processing_uses_reference_and_rejects_low_alignment():
     assert unaligned_job["status"] == "FAILED"
     assert unaligned_job["alignment_score"] == 0.0
     assert "alignment score" in unaligned_job["error"]
+
+
+def test_canonicalized_pages_skip_feature_based_template_warp(monkeypatch):
+    template_id = "canonical_page_processing"
+    reference = _reference_image()
+    assert client.post("/api/v1/templates/register", json=_template_payload(template_id)).status_code == 201
+    assert client.post(
+        f"/api/v1/templates/{template_id}/reference",
+        files={"file": ("reference.png", _png_bytes(reference), "image/png")},
+    ).status_code == 201
+
+    def should_not_align(*_args, **_kwargs):
+        raise AssertionError("canonical pages must not be template-warped")
+
+    monkeypatch.setattr(pipeline.image_aligner, "align_images", should_not_align)
+    response = client.post(
+        "/api/v1/documents/process",
+        files={"file": ("canonical.png", _png_bytes(reference), "image/png")},
+        data={"template_id": template_id, "canonicalized_pages": "true"},
+    )
+
+    assert response.status_code == 200, response.text
+    job = response.json()
+    assert job["alignment_method"] == "canonical_page_resize"
+    assert job["alignment_score"] == 1.0
+
+
+def test_text_field_uses_detected_lines_and_preserves_all_crop_artifacts(monkeypatch):
+    template_id = "line_aware_processing"
+    reference = _reference_image()
+    assert client.post("/api/v1/templates/register", json=_template_payload(template_id)).status_code == 201
+    assert client.post(
+        f"/api/v1/templates/{template_id}/reference",
+        files={"file": ("reference.png", _png_bytes(reference), "image/png")},
+    ).status_code == 201
+    monkeypatch.setattr(
+        pipeline.line_detector,
+        "detect",
+        lambda _crop: [DetectedLine(5, 5, 80, 20, 0.9), DetectedLine(5, 30, 80, 20, 0.9)],
+    )
+    monkeypatch.setattr(pipeline.ocr_router, "process_field_crop", lambda _crop, _kind: ("line", 0.9))
+
+    response = client.post(
+        "/api/v1/documents/process",
+        files={"file": ("canonical.png", _png_bytes(reference), "image/png")},
+        data={"template_id": template_id, "canonicalized_pages": "true"},
+    )
+
+    assert response.status_code == 200, response.text
+    field = response.json()["extracted_fields"][0]
+    assert field["raw_text"] == "line\nline"
+    assert field["ocr_mode"] == "detected_lines"
+    assert field["crop_image_path"]
+    assert field["preprocessed_crop_path"]
+    assert len(field["line_crop_paths"]) == 2
 
 
 def test_automatic_template_matching_selects_a_clear_reference_match():

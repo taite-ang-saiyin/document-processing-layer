@@ -205,4 +205,5 @@ def test_multi_page_document_keeps_aligned_page_data_when_another_page_needs_rev
     assert fields["page_two_value"].raw_text == ""
     assert fields["page_two_value"].human_review_flag is True
     assert "alignment review" in fields["page_two_value"].validation_message
-    assert ocr_crop_shapes == [(60, 200)]
+    # OCR receives the cleaned/padded crop when line detection falls back.
+    assert ocr_crop_shapes == [(80, 220)]

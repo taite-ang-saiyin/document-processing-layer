@@ -46,3 +46,22 @@ class CropEngine:
             crop_path = str(full_path)
 
         return crop_np, crop_path
+
+    @staticmethod
+    def save_artifact(
+        image_np: np.ndarray,
+        output_dir: Path,
+        job_id: str,
+        field_id: str,
+        artifact: str,
+        line_number: Optional[int] = None,
+    ) -> Optional[str]:
+        """Persist a derived crop while retaining the original field crop."""
+        if image_np is None or image_np.size == 0:
+            return None
+        output_dir.mkdir(parents=True, exist_ok=True)
+        line_suffix = f"_line_{line_number:02d}" if line_number is not None else ""
+        path = output_dir / f"{job_id}_{field_id}_{artifact}{line_suffix}.png"
+        if not cv2.imwrite(str(path), image_np):
+            raise OSError(f"Could not save {artifact} crop for field {field_id}")
+        return str(path)

@@ -77,7 +77,8 @@ def seed_default_templates():
 async def lifespan(app: FastAPI):
     persistence.load_templates(TEMPLATES_REGISTRY)
     persistence.load_jobs(JOBS_STORE)
-    seed_default_templates()
+    if settings.SEED_DEFAULT_TEMPLATE:
+        seed_default_templates()
     yield
 
 
@@ -88,8 +89,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Seed immediately on module import as well for tests
-seed_default_templates()
+# Seed immediately on module import only for standalone development and tests.
+if settings.SEED_DEFAULT_TEMPLATE:
+    seed_default_templates()
 
 app.add_middleware(
     CORSMiddleware,

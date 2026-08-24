@@ -83,6 +83,10 @@ async def process_document(
         default=None,
         description="Optional registered template ID. Omit to select a template by reference-image matching.",
     ),
+    canonicalized_pages: bool = Form(
+        default=False,
+        description="True only when pages were paper-cropped and perspective-corrected upstream.",
+    ),
 ):
     """Processes an image or multi-page PDF with an explicit or automatically matched template."""
     contents = await file.read()
@@ -128,6 +132,7 @@ async def process_document(
         template_selection_mode=template_selection_mode,
         template_match_score=template_match_score,
         template_match_runner_up_score=template_match_runner_up_score,
+        canonicalized_pages=canonicalized_pages,
     )
     return job
 

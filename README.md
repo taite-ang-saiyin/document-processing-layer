@@ -4,6 +4,10 @@ This FastAPI service executes approved extraction templates against completed in
 It does not create templates or run blank-form VLM analysis. The umbrella orchestrator performs
 registration/review and sends the approved pixel-based template definition here.
 
+In the unified Compose stack, `SEED_DEFAULT_TEMPLATE=false`. Therefore completed-document
+processing uses the fields and stable `field_id` values from the newly approved template version.
+The local `claim_form_v1` seed remains available only for standalone development and tests.
+
 ## Run and inspect
 
 ```bash
@@ -98,17 +102,32 @@ status and explains the page-count mismatch.
    pages with `pdftoppm -png -r 144` in a temporary directory.
 2. The pipeline derives the required page count from the highest `TemplateField.page`.
 3. Quality checks run on every required page and are aggregated into one job-level result.
-4. Page 1 is aligned to its approved reference with ORB/homography. Subsequent pages are resized
-   to their registered page dimensions.
+4. Canonical pages from visual-field detection are resized to their registered template dimensions;
+   they are not feature-warped again. Direct raw API uploads retain the legacy ORB/homography
+   alignment path.
 5. For every field, the pipeline selects `aligned_pages[field.page]`, crops its integer ROI,
-   preprocesses the crop, routes it by `field_type`, normalizes text, validates required/regex
-   rules, and adds the page number to the result.
-6. Any failed quality check, validation failure, or low-confidence field sets
+   retains the raw crop, cleans it, detects visual text lines for text-bearing fields, and sends
+   each reliable line to OCR in reading order. If line detection is unavailable or uncertain, it
+   OCRs the cleaned full crop instead. Checkboxes and signatures bypass line detection.
+6. When `LLM_POST_CORRECTION_ENABLED=true`, the service sends one full aligned page plus every
+   eligible field's pixel box, raw OCR text, confidence, and validation rule to the internal VLM
+   adapter. A suggestion is accepted only above the configured confidence threshold and when it
+   passes the field's `validation_regex`. Raw OCR is retained, and any accepted VLM change always
+   requires human review.
+7. Any failed quality check, validation failure, or low-confidence field sets
    `needs_human_review`; otherwise the job is `COMPLETED`.
-7. JSON, UTF-8 CSV, and Excel artifacts are written to the configured export directory.
+8. JSON, UTF-8 CSV, and Excel artifacts are written to the configured export directory.
 
 This design keeps page identity on the template field rather than encoding it into coordinates.
 The same crop code can therefore operate on single- and multi-page forms.
+
+## OCR crop artifacts
+
+Every processed field retains its raw crop. Text-bearing fields also retain a cleaned crop and,
+when detected, the individual OCR line crops. In the unified Docker deployment, inspect them on
+the host under `runtime/document-crops`, `runtime/document-preprocessed-crops`, and
+`runtime/document-line-crops` respectively. The job response records these paths as
+`crop_image_path`, `preprocessed_crop_path`, and `line_crop_paths`.
 
 ## Runtime limitations
 
@@ -125,6 +144,21 @@ Uncertain matches return a 422 response with ranked candidates.
 The handwriting and table routes currently reuse TrOCR, while checkbox
 and signature routes use simple pixel-density checks. Treat these as replaceable engine slots,
 not production-grade final models.
+
+## Optional Qwen3-VL post-correction
+
+The feature is off by default. To enable it in the unified stack, configure the internal VLM
+adapter with `VLM_POST_CORRECTION_PROVIDER=gemini`, `GEMINI_GOOGLE_CLOUD_PROJECT`,
+`GEMINI_GOOGLE_CLOUD_LOCATION=global`, and `GOOGLE_APPLICATION_CREDENTIALS_HOST_PATH`, then set
+`LLM_POST_CORRECTION_ENABLED=true`.
+The adapter sends each full page plus its field OCR results to Vertex AI Gemini using Application Default Credentials (ADC). The
+correction endpoint is internal and authenticated with the shared `VLM_API_KEY`; it is not
+exposed through the public orchestrator API.
+
+Gemini suggestions are applied when they contain a non-empty changed value. Template-level
+`validation_regex` rules remain in the extraction result as review signals for identifiers, dates,
+and numeric fields; they do not block applying Gemini's suggestion. Names and handwriting should
+normally remain reviewer-confirmed even when the VLM proposes a change.
 
 ## Tests
 

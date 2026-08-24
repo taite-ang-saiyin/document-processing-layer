@@ -103,6 +103,11 @@ class ExtractedFieldResult(BaseModel):
     final_confidence: float
     human_review_flag: bool
     crop_image_path: Optional[str] = None
+    preprocessed_crop_path: Optional[str] = None
+    line_crop_paths: List[str] = Field(default_factory=list)
+    ocr_mode: str = "full_field_fallback"
+    llm_post_correction_applied: bool = False
+    llm_post_correction_reason: Optional[str] = None
 
 
 class OcrCropResult(BaseModel):
@@ -124,6 +129,7 @@ class DocumentProcessingJob(BaseModel):
     page_alignment_scores: Dict[int, float] = Field(default_factory=dict)
     page_count: int = Field(default=1, ge=1)
     aligned_page_paths: Dict[int, str] = Field(default_factory=dict)
+    alignment_method: str = "template_homography"
     template_selection_mode: str = "explicit"
     template_match_score: Optional[float] = None
     template_match_runner_up_score: Optional[float] = None
