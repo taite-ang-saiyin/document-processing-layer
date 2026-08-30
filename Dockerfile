@@ -1,11 +1,18 @@
 FROM python:3.10-slim
 
+ARG DEBIAN_MIRROR=https://mirror.rackspace.com/debian
+ARG DEBIAN_SECURITY_MIRROR=https://mirror.rackspace.com/debian-security
+
 # Prevent Python from writing .pyc files and enable unbuffered logging
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 # Install system dependencies required for OpenCV and PyTorch
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN sed -E -i \
+      -e "s|https?://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" \
+      -e "s|https?://deb.debian.org/debian|${DEBIAN_MIRROR}|g" \
+      /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
     libgomp1 \

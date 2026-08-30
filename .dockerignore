@@ -13,6 +13,8 @@ htmlcov/
 storage/uploads/*
 storage/crops/*
 storage/exports/*
+models_weights/*
 !storage/uploads/.gitkeep
 !storage/crops/.gitkeep
 !storage/exports/.gitkeep
+!models_weights/.gitkeep
