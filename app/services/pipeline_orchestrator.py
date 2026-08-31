@@ -12,6 +12,7 @@ from app.services.crop_engine import CropEngine
 from app.services.line_detector import TextLineDetector
 from app.services.llm_post_corrector import LlmPostCorrector
 from app.services.mark_detector import TemplateMarkDetector
+from app.services.table_cell_extractor import TemplateCellExtractor
 from app.services.ocr_router import OCRRouter
 from app.services.exporter import StructuredExporter
 from app.services.persistence import PersistenceService
@@ -23,6 +24,8 @@ from app.models.schemas import (
     ExtractedFieldResult,
     QualityCheckResult,
     FieldType,
+    ExtractedTableCellResult,
+    ExtractedTableResult,
 )
 
 
@@ -42,6 +45,7 @@ class DocumentProcessingPipeline:
         self.line_detector = TextLineDetector()
         self.ocr_router = OCRRouter()
         self.mark_detector = TemplateMarkDetector()
+        self.table_cell_extractor = TemplateCellExtractor()
         self.llm_post_corrector = LlmPostCorrector()
         self.exporter = StructuredExporter()
         self.persistence = PersistenceService()
@@ -230,6 +234,12 @@ class DocumentProcessingPipeline:
                         ),
                         final_confidence=0.0,
                         human_review_flag=True,
+                        table_parent_field_id=field_def.table_parent_field_id,
+                        table_parent_label=field_def.table_parent_label,
+                        table_row_index=field_def.table_row_index,
+                        table_column_index=field_def.table_column_index,
+                        table_cell_order=field_def.table_cell_order,
+                        table_is_header=field_def.table_is_header,
                     )
                 )
                 continue
@@ -243,14 +253,47 @@ class DocumentProcessingPipeline:
             # Every text-bearing field attempts visual line detection. When the
             # detector is unavailable or uncertain, OCR falls back to the full
             # cleaned crop rather than silently losing parts of the field.
-            prepared_crop = self.crop_preprocessor.process(crop_np)
+            table_is_empty: bool | None = None
+            table_change_ratio: float | None = None
+            table_is_header = field_def.table_is_header
+            table_reference_fallback = False
+            reference_difference_path: str | None = None
+            ocr_input = crop_np
+            if field_def.table_parent_field_id:
+                reference_crop, _ = self.crop_engine.crop_field(
+                    template_references[field_def.page],
+                    field_def.bbox,
+                    job_id,
+                    field_def.id,
+                    save_to_disk=False,
+                )
+                cell_extraction = self.table_cell_extractor.isolate(crop_np, reference_crop)
+                ocr_input = cell_extraction.image
+                table_is_empty = cell_extraction.is_empty
+                table_change_ratio = cell_extraction.change_ratio
+                table_is_header = table_is_header or cell_extraction.is_header
+                table_reference_fallback = (
+                    cell_extraction.used_raw_fallback and not cell_extraction.is_header
+                )
+                reference_difference_path = self.crop_engine.save_artifact(
+                    cell_extraction.difference,
+                    settings.TABLE_CELL_DIFFERENCES_DIR,
+                    job_id,
+                    field_def.id,
+                    "template_delta",
+                )
+            prepared_crop = self.crop_preprocessor.process(ocr_input)
             prepared_crop_path = self.crop_engine.save_artifact(
                 prepared_crop, settings.PREPROCESSED_CROPS_DIR, job_id, field_def.id, "preprocessed"
             )
             line_crop_paths: list[str] = []
             ocr_mode = "full_field_fallback"
             mark_uncertain = False
-            if field_def.field_type == FieldType.CHECKBOX:
+            if field_def.table_parent_field_id and table_is_empty:
+                raw_text = ""
+                ocr_conf = 1.0
+                ocr_mode = "template_delta_empty"
+            elif field_def.field_type == FieldType.CHECKBOX:
                 reference_crop, _ = self.crop_engine.crop_field(
                     template_references[field_def.page], field_def.bbox, job_id, field_def.id,
                     save_to_disk=False,
@@ -296,6 +339,8 @@ class DocumentProcessingPipeline:
                     )
             else:
                 raw_text, ocr_conf = self.ocr_router.process_field_crop(prepared_crop, field_def.field_type)
+            if field_def.table_parent_field_id and not table_is_empty:
+                ocr_mode = f"template_delta_cell_{ocr_mode}"
             field_res = ExtractedFieldResult(
                 field_id=field_def.id,
                 label=field_def.label,
@@ -304,11 +349,20 @@ class DocumentProcessingPipeline:
                 raw_text=raw_text,
                 normalized_text=self.llm_post_corrector.normalized_raw(raw_text).text,
                 ocr_confidence=ocr_conf,
-                validation_passed=not mark_uncertain,
-                validation_message=("Checkbox/radio mark is close to the detection threshold; review required."
-                                    if mark_uncertain else None),
+                validation_passed=not mark_uncertain and not table_reference_fallback,
+                validation_message=(
+                    "Template table cell contains data; OCR used the current cell without template subtraction. Review this value."
+                    if table_reference_fallback
+                    else "Checkbox/radio mark is close to the detection threshold; review required."
+                    if mark_uncertain
+                    else None
+                ),
                 final_confidence=ocr_conf,
-                human_review_flag=mark_uncertain or ocr_conf < settings.CONFIDENCE_THRESHOLD,
+                human_review_flag=(
+                    mark_uncertain
+                    or table_reference_fallback
+                    or ocr_conf < settings.CONFIDENCE_THRESHOLD
+                ),
                 crop_image_path=crop_path,
                 preprocessed_crop_path=prepared_crop_path,
                 line_crop_paths=line_crop_paths,
@@ -319,10 +373,20 @@ class DocumentProcessingPipeline:
                 choice_option_value=field_def.choice_option_value,
                 choice_mode=field_def.choice_mode,
                 choice_selected=(raw_text == "[X] Checked" if field_def.choice_group_id else None),
+                table_parent_field_id=field_def.table_parent_field_id,
+                table_parent_label=field_def.table_parent_label,
+                table_row_index=field_def.table_row_index,
+                table_column_index=field_def.table_column_index,
+                table_cell_order=field_def.table_cell_order,
+                table_is_header=table_is_header,
+                table_is_empty=table_is_empty,
+                table_change_ratio=table_change_ratio,
+                reference_difference_path=reference_difference_path,
             )
 
             extracted_fields.append(field_res)
-            page_correction_candidates.setdefault(field_def.page, []).append((field_def, field_res))
+            if not table_is_empty:
+                page_correction_candidates.setdefault(field_def.page, []).append((field_def, field_res))
 
             if field_res.human_review_flag:
                 needs_human_review = True
@@ -370,6 +434,7 @@ class DocumentProcessingPipeline:
             status=status,
             quality_check=quality_res,
             extracted_fields=extracted_fields,
+            tables=self._build_tables(extracted_fields),
             overall_confidence=round(overall_conf, 3),
             needs_human_review=needs_human_review,
             alignment_score=round(float(np.mean(list(page_alignment_scores.values()))), 3),
@@ -390,6 +455,49 @@ class DocumentProcessingPipeline:
         # Save to jobs store (and database when available)
         self.persistence.save_job(job, JOBS_STORE)
         return job
+
+    @staticmethod
+    def _build_tables(fields: list[ExtractedFieldResult]) -> list[ExtractedTableResult]:
+        grouped: dict[tuple[str, int], list[ExtractedFieldResult]] = {}
+        for field in fields:
+            if field.table_parent_field_id is not None:
+                grouped.setdefault(
+                    (field.table_parent_field_id, field.page), []
+                ).append(field)
+
+        tables: list[ExtractedTableResult] = []
+        for (parent_id, page), members in grouped.items():
+            members.sort(key=lambda item: (
+                item.table_cell_order if item.table_cell_order is not None else 0,
+                item.table_row_index if item.table_row_index is not None else 0,
+                item.table_column_index if item.table_column_index is not None else 0,
+            ))
+            cells = [
+                ExtractedTableCellResult(
+                    field_id=field.field_id,
+                    row_index=field.table_row_index or 0,
+                    column_index=field.table_column_index or 0,
+                    order=field.table_cell_order or 0,
+                    is_header=field.table_is_header,
+                    is_empty=bool(field.table_is_empty),
+                    raw_text=field.raw_text,
+                    normalized_text=field.normalized_text,
+                    confidence=field.final_confidence,
+                    human_review_flag=field.human_review_flag,
+                )
+                for field in members
+            ]
+            tables.append(
+                ExtractedTableResult(
+                    table_parent_field_id=parent_id,
+                    label=members[0].table_parent_label or parent_id,
+                    page=page,
+                    row_count=max((cell.row_index for cell in cells), default=-1) + 1,
+                    column_count=max((cell.column_index for cell in cells), default=-1) + 1,
+                    cells=cells,
+                )
+            )
+        return tables
 
     @staticmethod
     def _resolve_choice_groups(fields: list[ExtractedFieldResult]) -> bool:

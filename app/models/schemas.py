@@ -40,6 +40,12 @@ class TemplateField(BaseModel):
     choice_group_id: Optional[str] = Field(default=None, pattern=SAFE_IDENTIFIER_PATTERN)
     choice_option_value: Optional[str] = Field(default=None, max_length=256)
     choice_mode: Optional[Literal["single_choice", "multiple_choice"]] = None
+    table_parent_field_id: Optional[str] = Field(default=None, pattern=SAFE_IDENTIFIER_PATTERN)
+    table_parent_label: Optional[str] = None
+    table_row_index: Optional[int] = Field(default=None, ge=0)
+    table_column_index: Optional[int] = Field(default=None, ge=0)
+    table_cell_order: Optional[int] = Field(default=None, ge=0)
+    table_is_header: bool = False
 
 
 class TemplatePage(BaseModel):
@@ -116,6 +122,37 @@ class ExtractedFieldResult(BaseModel):
     choice_mode: Optional[Literal["single_choice", "multiple_choice"]] = None
     choice_selected: Optional[bool] = None
     choice_group_status: Optional[str] = None
+    table_parent_field_id: Optional[str] = None
+    table_parent_label: Optional[str] = None
+    table_row_index: Optional[int] = Field(default=None, ge=0)
+    table_column_index: Optional[int] = Field(default=None, ge=0)
+    table_cell_order: Optional[int] = Field(default=None, ge=0)
+    table_is_header: bool = False
+    table_is_empty: Optional[bool] = None
+    table_change_ratio: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    reference_difference_path: Optional[str] = None
+
+
+class ExtractedTableCellResult(BaseModel):
+    field_id: str
+    row_index: int = Field(..., ge=0)
+    column_index: int = Field(..., ge=0)
+    order: int = Field(..., ge=0)
+    is_header: bool = False
+    is_empty: bool = False
+    raw_text: str = ""
+    normalized_text: str = ""
+    confidence: float = 0.0
+    human_review_flag: bool = False
+
+
+class ExtractedTableResult(BaseModel):
+    table_parent_field_id: str
+    label: str
+    page: int = Field(default=1, ge=1)
+    row_count: int = Field(default=0, ge=0)
+    column_count: int = Field(default=0, ge=0)
+    cells: List[ExtractedTableCellResult] = Field(default_factory=list)
 
 
 class OcrCropResult(BaseModel):
@@ -131,6 +168,7 @@ class DocumentProcessingJob(BaseModel):
     status: ProcessingStatus
     quality_check: Optional[QualityCheckResult] = None
     extracted_fields: List[ExtractedFieldResult] = Field(default_factory=list)
+    tables: List[ExtractedTableResult] = Field(default_factory=list)
     overall_confidence: float = 0.0
     needs_human_review: bool = False
     alignment_score: Optional[float] = None

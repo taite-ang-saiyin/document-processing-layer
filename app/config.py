@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     CROPS_DIR: Path = STORAGE_DIR / "crops"
     PREPROCESSED_CROPS_DIR: Path = STORAGE_DIR / "preprocessed_crops"
     LINE_CROPS_DIR: Path = STORAGE_DIR / "line_crops"
+    TABLE_CELL_DIFFERENCES_DIR: Path = STORAGE_DIR / "table_cell_differences"
     EXPORTS_DIR: Path = STORAGE_DIR / "exports"
     ALIGNED_PAGES_DIR: Path = STORAGE_DIR / "aligned_pages"
     TEMPLATE_REFERENCES_DIR: Path = STORAGE_DIR / "template_references"
@@ -30,6 +31,12 @@ class Settings(BaseSettings):
     TEMPLATE_MATCH_MARGIN: float = 0.10       # Required lead over the runner-up
     LINE_DETECTION_MIN_SCORE: float = 0.45
     LINE_DETECTION_PADDING_PX: int = 6
+    TABLE_CELL_DELTA_THRESHOLD: int = 32
+    TABLE_CELL_MIN_CHANGE_RATIO: float = 0.0015
+    TABLE_CELL_BORDER_MARGIN_RATIO: float = 0.03
+    TABLE_CELL_INK_THRESHOLD: int = 180
+    TABLE_CELL_REFERENCE_CONTENT_RATIO: float = 0.004
+    TABLE_CELL_HEADER_DARK_RATIO: float = 0.55
     LLM_POST_CORRECTION_ENABLED: bool = False
     LLM_POST_CORRECTION_URL: str = "http://insurance-vlm:8000"
     LLM_POST_CORRECTION_API_KEY: str = "local-vlm-key"
@@ -50,6 +57,7 @@ for path in [
     settings.CROPS_DIR,
     settings.PREPROCESSED_CROPS_DIR,
     settings.LINE_CROPS_DIR,
+    settings.TABLE_CELL_DIFFERENCES_DIR,
     settings.EXPORTS_DIR,
     settings.ALIGNED_PAGES_DIR,
     settings.TEMPLATE_REFERENCES_DIR,

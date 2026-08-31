@@ -207,3 +207,94 @@ def test_multi_page_document_keeps_aligned_page_data_when_another_page_needs_rev
     assert "alignment review" in fields["page_two_value"].validation_message
     # OCR receives the cleaned/padded crop when line detection falls back.
     assert ocr_crop_shapes == [(80, 220)]
+
+
+def test_fixed_layout_table_cells_extract_only_added_text(monkeypatch):
+    template_id = "table_cells_claim_v1"
+    template = {
+        "template_id": template_id,
+        "name": "Table cells claim",
+        "width": 360,
+        "height": 180,
+        "fields": [
+            {
+                "id": "cell_empty",
+                "label": "Benefits row 1, column 1",
+                "field_type": "printed_text",
+                "bbox": {"x": 20, "y": 40, "width": 150, "height": 80},
+                "required": False,
+                "table_parent_field_id": "field_benefits",
+                "table_parent_label": "Benefits",
+                "table_row_index": 0,
+                "table_column_index": 0,
+                "table_cell_order": 0,
+            },
+            {
+                "id": "cell_filled",
+                "label": "Benefits row 1, column 2",
+                "field_type": "printed_text",
+                "bbox": {"x": 170, "y": 40, "width": 150, "height": 80},
+                "required": False,
+                "table_parent_field_id": "field_benefits",
+                "table_parent_label": "Benefits",
+                "table_row_index": 0,
+                "table_column_index": 1,
+                "table_cell_order": 1,
+            },
+        ],
+    }
+    assert client.post("/api/v1/templates/register", json=template).status_code == 201
+
+    reference = np.full((180, 360, 3), 255, dtype=np.uint8)
+    cv2.rectangle(reference, (20, 40), (320, 120), (0, 0, 0), 2)
+    cv2.line(reference, (170, 40), (170, 120), (0, 0, 0), 2)
+    success, encoded_reference = cv2.imencode(".png", reference)
+    assert success
+    response = client.post(
+        f"/api/v1/templates/{template_id}/reference",
+        files={"file": ("reference.png", encoded_reference.tobytes(), "image/png")},
+    )
+    assert response.status_code == 201, response.text
+
+    filled = reference.copy()
+    cv2.putText(
+        filled,
+        "1250",
+        (190, 93),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (0, 0, 0),
+        2,
+        cv2.LINE_AA,
+    )
+    ocr_calls = []
+    monkeypatch.setattr(
+        "app.api.endpoints.documents.pipeline.line_detector.detect", lambda _crop: []
+    )
+
+    def cell_ocr(crop, *_args, **_kwargs):
+        ocr_calls.append(crop)
+        return "1250", 0.96
+
+    monkeypatch.setattr(
+        "app.api.endpoints.documents.pipeline.ocr_router.process_field_crop", cell_ocr
+    )
+
+    result = pipeline.process_document(
+        image_np=filled,
+        template_id=template_id,
+        canonicalized_pages=True,
+    )
+
+    fields = {field.field_id: field for field in result.extracted_fields}
+    assert fields["cell_empty"].raw_text == ""
+    assert fields["cell_empty"].table_is_empty is True
+    assert fields["cell_empty"].ocr_mode == "template_delta_empty"
+    assert fields["cell_filled"].raw_text == "1250"
+    assert fields["cell_filled"].table_is_empty is False
+    assert fields["cell_filled"].ocr_mode == "template_delta_cell_full_field_fallback"
+    assert len(ocr_calls) == 1
+    assert len(result.tables) == 1
+    assert result.tables[0].row_count == 1
+    assert result.tables[0].column_count == 2
+    assert [cell.normalized_text for cell in result.tables[0].cells] == ["", "1250"]
